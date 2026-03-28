@@ -29,6 +29,7 @@ raw_*
 *.db
 *.db-shm
 *.db-wal
+docs/ABS_API_REFERENCE.md
 
 # Audio files (if accidentally kept in root)
 *.m4b

@@ -153,8 +153,11 @@ def run_sync(args, config: Dict):
     exclude_tag = config.get("exclude_tag", "no-skim")
     ai_retries = config.get("ai_retries", 1)
     throttle_sec = args.throttle
+    force_tag = args.force_tag
+    no_metadatahints = args.no_metadatahints
 
     last_request_time = 0
+    total_processed = 0
 
     def smart_throttle():
         nonlocal last_request_time
@@ -171,45 +174,80 @@ def run_sync(args, config: Dict):
     library_exhausted = False
 
     while not killer.kill_now:
+        current_batch_limit = batch_size
+        if args.limit:
+            remaining = args.limit - total_processed
+            if remaining <= 0:
+                break
+            current_batch_limit = min(batch_size, remaining)
+
         # --- Batch Accumulation ---
-        batch = history_manager.get_pending_items(limit=batch_size)
+        batch = history_manager.get_pending_items(limit=current_batch_limit)
         
-        if len(batch) < batch_size and not library_exhausted:
-            needed = batch_size - len(batch)
+        if len(batch) < current_batch_limit and not library_exhausted:
+            needed = current_batch_limit - len(batch)
             logger.info(f"Filling batch: need {needed} more items from library discovery...")
             try:
                 for item in library_gen:
                     item_id = item.get("id")
                     media = item.get("media", {})
                     metadata = media.get("metadata", {})
-                    tags = metadata.get("tags", [])
+                    tags = media.get("tags", [])
                     
                     # Eligibility checks
                     if args.item_id and item_id != args.item_id:
                         continue
-                    if metadata.get("asin") and not args.force and not args.item_id:
+                    
+                    is_forced_by_tag = force_tag and force_tag in tags
+                    if force_tag and not is_forced_by_tag:
+                         continue
+                        
+                    if metadata.get("asin") and not args.force and not args.item_id and not is_forced_by_tag:
                         continue
                     if exclude_tag in tags and not args.force:
                         continue
                     
                     status = history_manager.get_latest_status(item_id)
                     needs_processing = False
-                    if processed_tag not in tags or args.force or args.reprocess:
-                        if status is None or status in ["failed-transcription", "hallucinated", "dry-run"]:
+                    
+                    if is_forced_by_tag or processed_tag not in tags or args.force or args.reprocess:
+                        auto_retry_statuses = set()
+                        if args.retry_failed:
+                            auto_retry_statuses = {"failed-ai", "failed-transcription", "hallucinated"}
+                        if is_forced_by_tag or status is None or status in auto_retry_statuses or (args.redo_dry_run and status == "dry-run"):
                             needs_processing = True
                         elif args.reprocess:
                             needs_processing = True
                     
                     if needs_processing:
-                        history_manager.log_start(item_id, metadata, run_id=run_id)
+                        if status is not None:
+                            # If forced by tag, we want a fresh start (re-transcribe and clear ASIN)
+                            if is_forced_by_tag:
+                                history_manager.reset_for_reprocess(item_id, metadata, run_id=run_id)
+                                existing_transcript = None
+                                # Remove ASIN locally so it doesn't show in hints
+                                metadata.pop("asin", None)
+                            else:
+                                existing_transcript = history_manager.reset_for_reprocess(
+                                    item_id, metadata, run_id=run_id
+                                )
+                        else:
+                            # Brand new item — insert a fresh started row
+                            history_manager.log_start(item_id, metadata, run_id=run_id)
+                            existing_transcript = None
+                            if is_forced_by_tag:
+                                metadata.pop("asin", None) # Ensure ASIN is gone from payload regardless
+                        
                         batch.append({
                             "item_id": item_id,
                             "metadata": metadata,
-                            "transcript": None,
-                            "status": "started"
+                            "transcript": existing_transcript,
+                            "status": "transcribed" if existing_transcript else "started",
+                            "is_forced_by_tag": is_forced_by_tag
                         })
-                        if len(batch) >= batch_size:
+                        if len(batch) >= current_batch_limit:
                             break
+
                 else:
                     library_exhausted = True
             except StopIteration:
@@ -221,9 +259,12 @@ def run_sync(args, config: Dict):
 
         # --- Transcription Phase ---
         to_transcribe = [i for i in batch if i["status"] == "started"]
+        if not args.retranscribe:
+            # Also skip items that already have a non-empty transcript even if status==started
+            to_transcribe = [i for i in to_transcribe if not i.get("transcript")]
         if to_transcribe:
             logger.info(f"--- Batch Phase: Transcription ({len(to_transcribe)} items) ---")
-            transcriber = Transcriber()
+            transcriber = Transcriber(history_manager=history_manager)
             for entry in to_transcribe:
                 if killer.kill_now: break
                 item_id = entry["item_id"]
@@ -256,73 +297,171 @@ def run_sync(args, config: Dict):
         # --- AI Analysis Phase ---
         to_analyze = [i for i in batch if i["status"] == "transcribed"]
         if to_analyze:
-            if not killer.kill_now:
-                logger.info(f"--- Batch Phase: AI Analysis ({len(to_analyze)} items) ---")
-                llm_client = LLMClient(
-                    model_id=config.get("llm_model", "mlx-community/Llama-3.2-3B-Instruct-4bit"),
-                    system_prompt=config.get("llm_system_prompt", "")
-                )
-                for entry in to_analyze:
-                    if killer.kill_now: break
-                    item_id = entry["item_id"]
-                    metadata = entry["metadata"]
-                    transcript = entry["transcript"]
+            logger.info(f"--- Batch Phase: Analysis ({len(to_analyze)} items) ---")
+            llm_client = LLMClient(
+                model_id=config.get("llm_model", LLMClient.DEFAULT_MODEL),
+                system_prompt=config.get("llm_system_prompt", ""),
+                history_manager=history_manager
+            )
+            for entry in to_analyze:
+                if killer.kill_now: break
+                item_id = entry["item_id"]
+                metadata = entry["metadata"]
+                transcript = entry["transcript"]
 
-                    logger.info(f"Analyzing: {metadata.get('title', 'Unknown')} ({item_id})")
-                    
-                    attempts = ai_retries + 1
-                    success = False
-                    for attempt in range(attempts):
-                        try:
-                            logger.info(f"Analyzing: {metadata.get('title', 'Unknown')} (Attempt {attempt+1})")
-                            suggested = llm_client.query_metadata(transcript, metadata, duration_sec=slice_duration)
+                logger.info(f"Analyzing: {metadata.get('title', 'Unknown')} ({item_id})")
+                
+                attempts = ai_retries + 1
+                success = False
+                for attempt in range(attempts):
+                    try:
+                        logger.info(f"Analyzing: {metadata.get('title', 'Unknown')} (Attempt {attempt+1})")
+                        suggested = llm_client.query_metadata(
+                            transcript, 
+                            metadata, 
+                            duration_sec=slice_duration,
+                            no_metadatahints=no_metadatahints
+                        )
+                        
+                        if not suggested:
+                            raise ValueError("Empty LLM response")
                             
-                            if not suggested:
-                                raise ValueError("Empty LLM response")
-                            
-                            if llm_client.is_hallucinated(suggested, transcript):
-                                if attempt < ai_retries:
-                                     continue
-                                history_manager.save_result(item_id, suggested, status="hallucinated")
-                                break
-                            
-                            # Apply changes
-                            mapping = {"title": "title", "author": "authorName", "narrator": "narratorName", "publisher": "publisher"}
-                            update_payload = {}
-                            for sug_key, abs_key in mapping.items():
-                                val = suggested.get(sug_key)
-                                if val and val != metadata.get(abs_key):
-                                    update_payload[abs_key] = val
-                            
-                            if update_payload:
-                                smart_throttle()
-                                if not dry_run:
-                                    abs_client.update_metadata(item_id, update_payload)
-                                    abs_client.add_tag(item_id, processed_tag)
-                                    history_manager.save_result(item_id, suggested, status="applied")
-                                else:
-                                    history_manager.save_result(item_id, suggested, status="dry-run")
-                            else:
-                                history_manager.save_result(item_id, suggested, status="no-change")
-                                if not dry_run:
-                                     smart_throttle()
-                                     abs_client.add_tag(item_id, processed_tag)
-                            
-                            success = True
+                        logger.info(f"LLM suggested: {json.dumps(suggested)}")
+                        
+                        if llm_client.is_hallucinated(suggested, transcript, current_metadata=metadata):
+                            if attempt < ai_retries:
+                                continue
+                            history_manager.save_result(item_id, suggested, status="hallucinated")
                             break
-                        except Exception as e:
-                            logger.error(f"  ❌ AI step failed for {metadata.get('title', 'Unknown')}: {e}")
-                    
-                    if not success and attempt == ai_retries:
-                         history_manager.set_status(item_id, "failed-ai")
-                         
-                llm_client.unload_model()
+                        
+                        # Apply changes mapping to ABS-compliant fields
+                        field_map = {
+                            "title": {"abs_key": "title", "type": "string", "summary_key": "title"},
+                            "author": {"abs_key": "authors", "type": "author_list", "summary_key": "authorName"},
+                            "narrator": {"abs_key": "narrators", "type": "string_list", "summary_key": "narratorName"},
+                            "publisher": {"abs_key": "publisher", "type": "string", "summary_key": "publisher"}
+                        }
+                        
+                        update_payload = {}
+                        for sug_key, info in field_map.items():
+                            val = suggested.get(sug_key)
+                            if not val:
+                                continue
+                            
+                            abs_key = info["abs_key"]
+                            field_type = info["type"]
+                            summary_key = info["summary_key"]
+                            
+                            is_match = False
+                            existing_summary = metadata.get(summary_key)
+                            if str(existing_summary or "").strip().lower() == val.strip().lower():
+                                is_match = True
+                            
+                            if not is_match:
+                                existing_struct = metadata.get(abs_key)
+                                if isinstance(existing_struct, list):
+                                    for item in existing_struct:
+                                        text = item.get('name', '') if isinstance(item, dict) else str(item)
+                                        if text.strip().lower() == val.strip().lower():
+                                            is_match = True
+                                            break
+                            
+                            if not is_match:
+                                if field_type == "author_list":
+                                    update_payload[abs_key] = [{"name": val}]
+                                elif field_type == "string_list":
+                                    update_payload[abs_key] = [val]
+                                else:
+                                    update_payload[abs_key] = val
+                        
+                        if is_forced_by_tag:
+                             # Ensure ASIN is cleared in ABS
+                             update_payload["asin"] = None
+                        
+                        if update_payload:
+                            smart_throttle()
+                            if not dry_run:
+                                abs_client.update_metadata(item_id, update_payload)
+                                abs_client.add_tag(item_id, processed_tag)
+                                history_manager.save_result(item_id, suggested, status="applied")
+                                if entry.get("is_forced_by_tag"):
+                                    abs_client.remove_tag(item_id, force_tag)
+                            else:
+                                history_manager.save_result(item_id, suggested, status="dry-run")
+                        else:
+                            # If forced, we still might want to clear the ASIN and tag even if no other change
+                            if is_forced_by_tag and not dry_run:
+                                 abs_client.update_metadata(item_id, {"asin": None})
+                                 abs_client.remove_tag(item_id, force_tag)
+                            
+                            history_manager.save_result(item_id, suggested, status="no-change")
+                            if not dry_run:
+                                abs_client.add_tag(item_id, processed_tag)
+                        
+                        success = True
+                        break
+                    except Exception as e:
+                        logger.error(f"Error during AI analysis for {item_id}: {e}")
+                        if attempt >= ai_retries:
+                            history_manager.set_status(item_id, "failed-ai")
+
+            llm_client.unload_model()
+
+        total_processed += len(batch)
+        if args.limit and total_processed >= args.limit:
+            logger.info(f"Total limit reached ({total_processed}/{args.limit}). Stopping.")
+            break
 
         if args.item_id: # Single item mode
             break
 
-    logger.info("Sync complete.")
-    handle_report(argparse.Namespace(report=run_id), history_manager)
+    logger.info(f"Sync run completed. Total items: {total_processed}")
+    
+    # Detailed Report
+    summary = history_manager.get_run_summary(run_id)
+    print("\n" + "="*40)
+    print(f" Report for Run: {run_id}")
+    print("="*40)
+    
+    if not args.barebones_report:
+        details = history_manager.get_run_items(run_id)
+        
+        # Applied / Dry-Run
+        updates = [i for i in details if i["status"] in ["applied", "dry-run"]]
+        if updates:
+            print(f"\n✅ UPDATED ({len(updates)} items):")
+            if dry_run: print(" (DRY RUN - No changes applied to ABS)")
+            for item in updates:
+                orig = item["original_metadata"]
+                sug = item["suggested_metadata"]
+                print(f"  - {orig.get('authorName', 'Unknown')} - {orig.get('title', 'Unknown')}")
+                print(f"    -> {sug.get('author', 'Unknown')} - {sug.get('title', 'Unknown')}")
+        
+        # No-Change (Confirmed)
+        no_changes = [i for i in details if i["status"] == "no-change"]
+        if no_changes:
+            print(f"\n🤝 CONFIRMED (No change needed - {len(no_changes)} items):")
+            for item in no_changes:
+                orig = item["original_metadata"]
+                print(f"  - {orig.get('authorName', 'Unknown')} - {orig.get('title', 'Unknown')}")
+
+        # Failed
+        failed = [i for i in details if i["status"] in ["failed-ai", "failed-transcription", "hallucinated"]]
+        if failed:
+            print(f"\n❌ FAILED ({len(failed)} items):")
+            for item in failed:
+                orig = item["original_metadata"]
+                print(f"  - {orig.get('authorName', 'Unknown')} - {orig.get('title', 'Unknown')} [{item['status']}]")
+    else:
+        # Barebones report
+        print(f"Run ID: {run_id}")
+        print(f"Started: {summary['start']}")
+        print(f"Ended: {summary['end']}")
+        print("-" * 20)
+        for status, count in summary["stats"].items():
+            print(f"{status.capitalize():<20}: {count}")
+            
+    print("="*40 + "\n")
 
 def main():
     parser = argparse.ArgumentParser(description="Audiobookshelf Skimmer")
@@ -333,9 +472,15 @@ def main():
     parser.add_argument("--revert", help="Item ID to revert to original metadata")
     parser.add_argument("--item-id", help="Process only a single library item ID")
     parser.add_argument("--library", help="Only process items from this library name")
+    parser.add_argument("--limit", type=int, help="Total items to process before stopping (will finish the last batch)")
     parser.add_argument("--retranscribe", action="store_true", help="Force re-transcription even if exists")
+    parser.add_argument("--redo-dry-run", action="store_true", help="Re-process items previously recorded as dry-run (e.g. to apply changes for real)")
+    parser.add_argument("--retry-failed", action="store_true", help="Re-queue items that previously failed (failed-ai, failed-transcription, hallucinated status)")
+    parser.add_argument("--force-tag", help="Reprocess all items with this tag and remove it when done (forces re-transcription)")
+    parser.add_argument("--no-metadatahints", action="store_true", help="Do not provide existing metadata to the LLM (test blind extraction)")
     parser.add_argument("--report", nargs="?", const="", help="View summary of the latest run or a specific run ID")
     parser.add_argument("--list-runs", action="store_true", help="Display a table of past executions")
+    parser.add_argument("--barebones-report", action="store_true", help="Skip detailed change list in final report")
     parser.add_argument(
         "--item-info",
         help="Show full details for a specific book ID"

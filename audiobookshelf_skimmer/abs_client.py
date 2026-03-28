@@ -65,7 +65,26 @@ class ABSClient:
     def get_stream_info(self, item_id: str) -> Dict:
         """Starts a playback session via POST /api/items/{itemId}/play."""
         url = f"{self.base_url}/api/items/{item_id}/play"
-        response = requests.post(url, headers=self.headers, json={})
+        
+        payload = {
+            "deviceInfo": {
+                "clientVersion": "0.0.1",
+                "clientName": "Audiobookshelf Skimmer"
+            },
+            "forceDirectPlay": True,
+            "supportedMimeTypes": [
+                "audio/flac",
+                "audio/mpeg", 
+                "audio/mp4",
+                "audio/m4a",
+                "audio/m4b",
+                "audio/aac",
+                "audio/ogg",
+                "audio/x-m4b"
+            ]
+        }
+        
+        response = requests.post(url, headers=self.headers, json=payload)
         response.raise_for_status()
         return response.json()
 
@@ -100,27 +119,29 @@ class ABSClient:
         return slice_audio(stream_url, duration_sec=duration_sec, headers=headers)
 
     def update_metadata(self, item_id: str, metadata: Dict):
-        """Updates library item metadata."""
-        url = f"{self.base_url}/api/items/{item_id}"
-        payload = {"media": {"metadata": metadata}}
+        """Updates library item metadata via PATCH /api/items/{id}/media."""
+        url = f"{self.base_url}/api/items/{item_id}/media"
+        payload = {"metadata": metadata}
         requests.patch(url, headers=self.headers, json=payload).raise_for_status()
 
     def add_tag(self, item_id: str, tag: str):
         """Adds a tag to a library item."""
         item = self.get_item_details(item_id)
-        current_tags = item.get("media", {}).get("metadata", {}).get("tags", [])
+        current_tags = item.get("media", {}).get("tags", [])
         if tag not in current_tags:
             current_tags.append(tag)
-            self.update_metadata(item_id, {"tags": current_tags})
+            url = f"{self.base_url}/api/items/{item_id}/media"
+            requests.patch(url, headers=self.headers, json={"tags": current_tags}).raise_for_status()
 
     def remove_tag(self, item_id: str, tag: str):
         """Removes a tag from a library item."""
         item = self.get_item_details(item_id)
-        current_tags = item.get("media", {}).get("metadata", {}).get("tags", [])
+        current_tags = item.get("media", {}).get("tags", [])
         if tag in current_tags:
             current_tags.remove(tag)
-            self.update_metadata(item_id, {"tags": current_tags})
+            url = f"{self.base_url}/api/items/{item_id}/media"
+            requests.patch(url, headers=self.headers, json={"tags": current_tags}).raise_for_status()
             
     def get_tags(self, item_id: str) -> List[str]:
         item = self.get_item_details(item_id)
-        return item.get("media", {}).get("metadata", {}).get("tags", [])
+        return item.get("media", {}).get("tags", [])

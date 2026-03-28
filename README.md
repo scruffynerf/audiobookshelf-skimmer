@@ -12,11 +12,16 @@ Audiobookshelf Skimmer is a precision tool designed to automatically correct Tit
 - **🧠 Local AI Power**: Runs entirely on your machine.
   - **Transcription**: Uses NVIDIA's **Parakeet** model via Apple's **MLX** framework.
   - **Correction**: Uses **mlx-lm** to run models like Llama 3 locally.
+  - **Offline Caching**: Models are automatically loaded directly from the local cache on subsequent runs, avoiding redundant network checks.
 - **🔄 Memory-Efficient Batching**: Processes books in batches of 10, swapping models in and out of memory to stay within an 8GB RAM target.
 - **🛡️ Smart & Safe**:
   - **ASIN Skip**: Automatically skips books that already have an ASIN (assumed to be already identified).
-  - **Hallucination Detection**: Basic logic to ensure the LLM doesn't suggest titles or authors that are completely absent from the transcript.
-  - **Dry Run Mode**: Preview all changes before they are committed to your library.
+  - **Hallucination Detection**: Filters out LLM responses that invent titles or authors not found in the transcript. Values that match existing metadata are always accepted (the transcript may simply lack an intro).
+  - **Dry Run Mode**: Preview all changes before they are committed. Dry-run results are remembered — subsequent runs skip them automatically, so you never re-transcribe the same book twice.
+- **🎯 Specialized Refinement**:
+  - **Force Tag**: Use `--force-tag` to strictly focus on a set of problematic books. It clears an existing (potentially wrong) ASIN and performs a full re-process.
+    - I added this to work with <https://github.com/scruffynerf/audiobookshelf-duration-checker> to fix books that had really wrong durations and incorrect metadata including an ASIN.
+  - **Blind Extraction**: Use `--no-metadatahints` to force the AI to rely exclusively on the transcript, ignoring existing metadata.
 
 ---
 
@@ -64,13 +69,21 @@ Edit `config.json`:
 
 The project provides a clean `skimmer` command via `uv run`:
 
-### Run a Dry Run (Recommended)
+### Run a Dry Run (Recommended First Step)
 
 ```bash
 uv run skimmer --dry-run
 ```
 
-### Perform the Sync
+Dry-run results are saved to the database and **skipped on subsequent runs**. Once you're happy with the preview, apply the changes for real:
+
+```bash
+uv run skimmer --redo-dry-run
+```
+
+This re-processes only the books that were previously dry-run'd, this time writing to Audiobookshelf.
+
+### Perform a Full Sync (No Preview)
 
 ```bash
 uv run skimmer
@@ -86,15 +99,26 @@ uv run skimmer --revert abs_your_item_id
 
 ### Options
 
-- `--force`: Process all books, even those that already have an ASIN.
-- `--reprocess`: Process books even if they already have the `ai-skimmed` tag.
-- `--retranscribe`: Force a new transcription even if one exists in the database.
-- `--config <path>`: Use a custom configuration file.
-- `--item-id <ID>`: Process only a single specific library item.
-- `--throttle <sec>`: Seconds to wait between server requests (default: 1.0).
-- `--report [run_id]`: Show a summary of the latest run or a specific Run ID.
-- `--list-runs`: Show a history of all past execution runs.
-- `--item-info <ID>`: Show deep-dive details for a specific book (metadata, transcript, decision).
+| Flag | Description |
+| --- | --- |
+| `--dry-run` | Preview changes without writing anything to Audiobookshelf. |
+| `--redo-dry-run` | Re-process items that were previously recorded as dry-run (e.g. to apply them for real). |
+| `--retry-failed` | Re-queue items that previously failed (`failed-ai`, `failed-transcription`, or `hallucinated` status). |
+| `--reprocess` | Re-process items even if they already have the `ai-skimmed` tag (nuclear option). |
+| `--force` | Process all books, even those that already have an ASIN. |
+| `--retranscribe` | Force a new transcription even if one exists in the database. |
+| `--library <name>` | Only process items from this named library. |
+| `--limit <n>` | Stop after processing this many items total. |
+| `--force-tag <tag>` | Strictly process only items with this tag. Overrides ASIN skip, clears the ASIN in ABS, and forces a full re-transcription. Tag is removed on success. |
+| `--no-metadatahints` | Perform a "blind" extraction by omitting existing metadata from the LLM prompt. |
+| `--throttle <sec>` | Seconds to wait between server requests (default: `1.0`). |
+| `--config <path>` | Use a custom configuration file. |
+| `--item-id <ID>` | Process only a single specific library item. |
+| `--revert <ID>` | Revert a single item to its original metadata. |
+| `--report [run_id]` | Show a summary of the latest run or a specific Run ID. |
+| `--barebones-report` | Skip the detailed list of changes in the final report, showing only numerical counts. |
+| `--list-runs` | Show a history of all past execution runs. |
+| `--item-info <ID>` | Show full details for a specific book (metadata, transcript, AI decision). |
 
 ---
 
@@ -102,7 +126,7 @@ uv run skimmer --revert abs_your_item_id
 
 1. **Discovery (Server-Safe)**: The script fetches library items using **pagination** (100 at a time) and a mandatory throttle delay to avoid overloading your server.
 2. **Persistent Queue**: Items are queued with a `run_id` for tracking and reporting.
-3. **Stream & Capture**: For each queued item (**one at a time**), `ffmpeg` captures exactly 120s of audio directly from the stream.
+3. **Stream & Capture**: For each queued item (**one at a time**), `ffmpeg` captures exactly the first 30-120 seconds of audio directly from the stream. (configurable)
 4. **Transcribe**: The slice is transcribed locally using Parakeet-MLX and saved to the DB immediately.
 5. **Analyze**: Transcripts are processed by a local LLM in a separate phase, ensuring memory is freed between steps.
 6. **Apply & Report**: Metadata is updated in ABS, and a detailed report is generated for the run.
@@ -113,4 +137,4 @@ uv run skimmer --revert abs_your_item_id
 
 GPL-3.0 © 2026
 
-<p align="center">Made for the messy audiobook library that needs a quick "skim" to get things right.</p>
+*Made for the messy audiobook library that needs a quick "skim" to get things right.*

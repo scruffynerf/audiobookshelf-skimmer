@@ -28,6 +28,13 @@ class HistoryManager:
                 )
             """)
             
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS app_metadata (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                )
+            """)
+            
             # Simple migration for existing DBs
             try:
                 conn.execute("ALTER TABLE history ADD COLUMN run_id TEXT")
@@ -36,6 +43,22 @@ class HistoryManager:
                 conn.execute("ALTER TABLE history ADD COLUMN last_updated TEXT")
             except sqlite3.OperationalError: pass
             
+            conn.commit()
+
+    def get_app_metadata(self, key: str) -> Optional[str]:
+        """Retrieves a value from the app_metadata table."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("SELECT value FROM app_metadata WHERE key = ?", (key,))
+            row = cursor.fetchone()
+            return row[0] if row else None
+
+    def set_app_metadata(self, key: str, value: str):
+        """Sets a value in the app_metadata table."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO app_metadata (key, value) VALUES (?, ?)",
+                (key, value)
+            )
             conn.commit()
 
     def log_start(self, item_id: str, original_metadata: Dict, run_id: Optional[str] = None):
@@ -99,6 +122,39 @@ class HistoryManager:
             row = cursor.fetchone()
             return row[0] if row else None
 
+    def get_latest_transcript(self, item_id: str) -> Optional[str]:
+        """Returns the most recent non-empty transcript for an item, if any."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(
+                "SELECT transcript FROM history WHERE item_id = ? AND transcript IS NOT NULL AND transcript != '' ORDER BY timestamp DESC LIMIT 1",
+                (item_id,)
+            )
+            row = cursor.fetchone()
+            return row[0] if row else None
+
+    def reset_for_reprocess(self, item_id: str, original_metadata: Dict, run_id: Optional[str] = None):
+        """
+        Re-queues an item for reprocessing by updating the most recent row in-place.
+        If a transcript already exists it is preserved and the status is set to
+        'transcribed' (skip re-transcription). Otherwise status is set to 'started'.
+        """
+        existing_transcript = self.get_latest_transcript(item_id)
+        now = datetime.now().isoformat()
+        new_status = "transcribed" if existing_transcript else "started"
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                UPDATE history SET run_id = ?, last_updated = ?, original_metadata = ?,
+                    transcript = COALESCE(transcript, NULL), status = ?
+                WHERE item_id = ? AND id = (
+                    SELECT id FROM history WHERE item_id = ? ORDER BY timestamp DESC LIMIT 1
+                )
+                """,
+                (run_id, now, json.dumps(original_metadata), new_status, item_id, item_id)
+            )
+            conn.commit()
+        return existing_transcript
+
     def get_items_by_status(self, status: str, limit: Optional[int] = None) -> List[Dict]:
         """Returns all items currently in a specific status."""
         query = "SELECT item_id, original_metadata, transcript FROM history WHERE status = ?"
@@ -131,6 +187,23 @@ class HistoryManager:
                     "item_id": row[0],
                     "metadata": json.loads(row[1]) if row[1] else {},
                     "transcript": row[2],
+                    "status": row[3]
+                })
+            return items
+
+    def get_run_items(self, run_id: str) -> List[Dict]:
+        """Returns all items associated with a specific run."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(
+                "SELECT item_id, original_metadata, suggested_metadata, status FROM history WHERE run_id = ?",
+                (run_id,)
+            )
+            items = []
+            for row in cursor.fetchall():
+                items.append({
+                    "item_id": row[0],
+                    "original_metadata": json.loads(row[1]) if row[1] else {},
+                    "suggested_metadata": json.loads(row[2]) if row[2] else {},
                     "status": row[3]
                 })
             return items

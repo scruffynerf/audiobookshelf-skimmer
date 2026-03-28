@@ -1,21 +1,20 @@
-import subprocess
-import tempfile
-from pathlib import Path
 import logging
-import static_ffmpeg
 
-# Ensure ffmpeg is available (installs a local copy if missing)
+import static_ffmpeg
+from pathlib import Path
+
+# Ensure ffmpeg is available
 static_ffmpeg.add_paths(weak=True)
 
 logger = logging.getLogger(__name__)
 
-def slice_audio(input_source: str, duration_sec: int = 120, output_file: Path = None, headers: dict = None) -> Path:
+import subprocess
+
+def slice_audio(input_source: str, duration_sec: int = 30, output_file: Path = None, headers: dict = None) -> Path:
     """
-    Extracts the first N seconds of an audio source (file or URL) using ffmpeg.
-    If output_file is not provided, a temporary file is created.
+    Extracts the first N seconds of an audio source (file or URL) using native subprocess.
     """
     if not output_file:
-        # Use a dedicated tmp directory (ignored by git)
         tmp_dir = Path.cwd() / "tmp"
         tmp_dir.mkdir(exist_ok=True)
         
@@ -31,42 +30,42 @@ def slice_audio(input_source: str, duration_sec: int = 120, output_file: Path = 
 
     logger.info(f"Slicing first {duration_sec}s of {input_source} to {output_file.name} (16kHz Mono WAV)")
     
-    # Prepare ffmpeg command
-    cmd = ["ffmpeg", "-y", "-v", "error"]
+    # We use naked subprocess because ffmpegio's pipe handling deadlocks python
+    # when ffmpeg fails fast on 404 chunks in HLS streams.
+    cmd = [
+        "ffmpeg", "-y", "-loglevel", "error", "-nostdin",
+        "-probesize", "1000000", "-analyzeduration", "1000000",
+        "-fflags", "+nobuffer", "-flags", "+low_delay",
+        "-reconnect", "1", "-reconnect_at_eof", "1",
+        "-reconnect_streamed", "1", "-reconnect_delay_max", "2",
+        "-timeout", "5000000", "-rw_timeout", "5000000"
+    ]
     
-    # Add headers if provided (must come before -i)
     if headers:
-        header_str = "\r\n".join([f"{k}: {v}" for k, v in headers.items()]) + "\r\n"
+        header_str = "".join([f"{k}: {v}\r\n" for k, v in headers.items()])
         cmd.extend(["-headers", header_str])
         
     cmd.extend([
         "-i", str(input_source),
         "-t", str(duration_sec),
-        "-ar", "16000", # 16kHz
-        "-ac", "1",     # Mono
+        "-ar", "16000",
+        "-ac", "1",
         str(output_file)
     ])
 
     try:
-        subprocess.run(cmd, check=True)
+        # Hard kill after 60s max to prevent python from EVER hanging indefinitely
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=60)
+        
+        # Explicit check that the file was actually created and isn't empty
+        if not output_file.exists() or output_file.stat().st_size == 0:
+            raise RuntimeError(f"ffmpeg failed to create output file: {output_file}")
+            
         return output_file
+    except subprocess.TimeoutExpired:
+        logger.error("ffmpeg timed out completely - hard killed after 60s")
+        raise RuntimeError("ffmpeg execution timed out")
     except subprocess.CalledProcessError as e:
-        logger.error(f"Failed to slice audio: {e}")
-        # If copy fails (e.g. codec issues with short duration), try re-encoding to a simple format
-        try:
-            logger.info("Retrying with re-encoding to wav...")
-            output_file_wav = output_file.with_suffix(".wav")
-            # Create a new command for re-encoding
-            re_cmd = ["ffmpeg", "-y", "-v", "error"]
-            if headers:
-                re_cmd.extend(["-headers", header_str])
-            re_cmd.extend([
-                "-i", str(input_source),
-                "-t", str(duration_sec),
-                str(output_file_wav)
-            ])
-            subprocess.run(re_cmd, check=True)
-            return output_file_wav
-        except subprocess.CalledProcessError as e2:
-            logger.error(f"Failed to slice audio even with re-encoding: {e2}")
-            raise e2
+        logger.error(f"Failed to slice audio: {e.stderr}")
+        raise RuntimeError(f"ffmpeg failed with code {e.returncode}: {e.stderr}")
+

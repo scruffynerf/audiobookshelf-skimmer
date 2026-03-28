@@ -16,6 +16,9 @@ dependencies = [
     "mlx-lm>=0.31.1",
 ]
 
+[tool.setuptools]
+packages = ["audiobookshelf_skimmer"]
+
 [project.scripts]
 skimmer = "audiobookshelf_skimmer.sync_metadata:main"
 
