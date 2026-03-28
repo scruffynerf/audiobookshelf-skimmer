@@ -3,7 +3,7 @@ import json
 import logging
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 
 logger = logging.getLogger(__name__)
 
@@ -18,39 +18,63 @@ class HistoryManager:
                 CREATE TABLE IF NOT EXISTS history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     item_id TEXT NOT NULL,
+                    run_id TEXT,
                     timestamp TEXT NOT NULL,
+                    last_updated TEXT,
                     original_metadata TEXT,
                     transcript TEXT,
                     suggested_metadata TEXT,
                     status TEXT
                 )
             """)
+            
+            # Simple migration for existing DBs
+            try:
+                conn.execute("ALTER TABLE history ADD COLUMN run_id TEXT")
+            except sqlite3.OperationalError: pass
+            try:
+                conn.execute("ALTER TABLE history ADD COLUMN last_updated TEXT")
+            except sqlite3.OperationalError: pass
+            
             conn.commit()
 
-    def log_start(self, item_id: str, original_metadata: Dict):
+    def log_start(self, item_id: str, original_metadata: Dict, run_id: Optional[str] = None):
         """Logs the start of processing for an item with its original metadata."""
+        now = datetime.now().isoformat()
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
-                "INSERT INTO history (item_id, timestamp, original_metadata, status) VALUES (?, ?, ?, ?)",
-                (item_id, datetime.now().isoformat(), json.dumps(original_metadata), "started")
+                "INSERT INTO history (item_id, run_id, timestamp, last_updated, original_metadata, status) VALUES (?, ?, ?, ?, ?, ?)",
+                (item_id, run_id, now, now, json.dumps(original_metadata), "started")
             )
             conn.commit()
 
     def save_transcript(self, item_id: str, transcript: str):
         """Updates the history record with the transcript."""
+        now = datetime.now().isoformat()
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
-                "UPDATE history SET transcript = ?, status = ? WHERE item_id = ? AND status = ?",
-                (transcript, "transcribed", item_id, "started")
+                "UPDATE history SET transcript = ?, status = ?, last_updated = ? WHERE item_id = ? AND status = ?",
+                (transcript, "transcribed", now, item_id, "started")
             )
             conn.commit()
 
     def save_result(self, item_id: str, suggested_metadata: Dict, status: str = "applied"):
         """Updates the history record with the suggested metadata and final status."""
+        now = datetime.now().isoformat()
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
-                "UPDATE history SET suggested_metadata = ?, status = ? WHERE item_id = ? AND status = ?",
-                (json.dumps(suggested_metadata), status, item_id, "transcribed")
+                "UPDATE history SET suggested_metadata = ?, status = ?, last_updated = ? WHERE item_id = ? AND status = ?",
+                (json.dumps(suggested_metadata), status, now, item_id, "transcribed")
+            )
+            conn.commit()
+
+    def set_status(self, item_id: str, status: str):
+        """Manually sets the status of an item."""
+        now = datetime.now().isoformat()
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE history SET status = ?, last_updated = ? WHERE item_id = ?",
+                (status, now, item_id)
             )
             conn.commit()
 
@@ -74,3 +98,109 @@ class HistoryManager:
             )
             row = cursor.fetchone()
             return row[0] if row else None
+
+    def get_items_by_status(self, status: str, limit: Optional[int] = None) -> List[Dict]:
+        """Returns all items currently in a specific status."""
+        query = "SELECT item_id, original_metadata, transcript FROM history WHERE status = ?"
+        params = [status]
+        if limit:
+            query += " LIMIT ?"
+            params.append(limit)
+            
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(query, params)
+            items = []
+            for row in cursor.fetchall():
+                items.append({
+                    "item_id": row[0],
+                    "metadata": json.loads(row[1]) if row[1] else {},
+                    "transcript": row[2]
+                })
+            return items
+
+    def get_pending_items(self, limit: int = 10) -> List[Dict]:
+        """Returns items that are either 'started' or 'transcribed', up to limit."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(
+                "SELECT item_id, original_metadata, transcript, status FROM history WHERE status IN ('started', 'transcribed') LIMIT ?",
+                (limit,)
+            )
+            items = []
+            for row in cursor.fetchall():
+                items.append({
+                    "item_id": row[0],
+                    "metadata": json.loads(row[1]) if row[1] else {},
+                    "transcript": row[2],
+                    "status": row[3]
+                })
+            return items
+
+    def list_runs(self) -> List[Dict]:
+        """Returns a list of unique runs and their summary."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("""
+                SELECT run_id, MIN(timestamp), MAX(last_updated), COUNT(*)
+                FROM history 
+                GROUP BY run_id 
+                ORDER BY MIN(timestamp) DESC
+            """)
+            runs = []
+            for row in cursor.fetchall():
+                runs.append({
+                    "run_id": row[0] or "unknown",
+                    "start": row[1],
+                    "end": row[2],
+                    "count": row[3]
+                })
+            return runs
+
+    def get_run_summary(self, run_id: str) -> Dict:
+        """Returns stats for a specific run."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("""
+                SELECT status, COUNT(*) 
+                FROM history 
+                WHERE run_id = ? 
+                GROUP BY status
+            """, (run_id,))
+            stats = {row[0]: row[1] for row in cursor.fetchall()}
+            
+            # Get timing
+            cursor = conn.execute("SELECT MIN(timestamp), MAX(last_updated) FROM history WHERE run_id = ?", (run_id,))
+            timing = cursor.fetchone()
+            
+            return {
+                "run_id": run_id,
+                "stats": stats,
+                "start": timing[0] if timing else None,
+                "end": timing[1] if timing else None
+            }
+
+    def get_total_summary(self) -> Dict:
+        """Returns global stats."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("SELECT status, COUNT(*) FROM history GROUP BY status")
+            stats = {row[0]: row[1] for row in cursor.fetchall()}
+            return stats
+
+    def get_item_detail(self, item_id: str) -> Optional[Dict]:
+        """Returns full history for a single item ID."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(
+                "SELECT * FROM history WHERE item_id = ? ORDER BY timestamp DESC LIMIT 1",
+                (item_id,)
+            )
+            row = cursor.fetchone()
+            if row:
+                # Column names from history table: id, item_id, run_id, timestamp, last_updated, original_metadata, transcript, suggested_metadata, status
+                return {
+                    "item_id": row[1],
+                    "run_id": row[2],
+                    "timestamp": row[3],
+                    "last_updated": row[4],
+                    "original_metadata": json.loads(row[5]) if row[5] else {},
+                    "transcript": row[6],
+                    "suggested_metadata": json.loads(row[7]) if row[7] else {},
+                    "status": row[8]
+                }
+        return None

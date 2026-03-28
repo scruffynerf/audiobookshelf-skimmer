@@ -50,7 +50,13 @@ Edit `config.json`:
 
 - `abs_url`: Your Audiobookshelf server URL (e.g., `http://192.168.1.50:3789`).
 - `abs_api_key`: Your ABS API Key (found in Settings -> Users -> API Keys).
-- `llm_model`: The model to use (e.g., `llama3`).
+- `llm_model`: The MLX model ID from Hugging Face (e.g., `mlx-community/Llama-3.2-3B-Instruct-4bit`).
+- `batch_size`: Number of books to process in one memory-managed batch (default: `10`).
+- `slice_duration_sec`: Length of the audio snippet to transcribe (default: `120`).
+- `processed_tag`: Tag applied to books after successful processing (default: `ai-skimmed`).
+- `ai_retries`: Number of times the LLM will retry if hallucination is detected (default: `1`).
+- `dry_run`: If `true`, no changes will be written to Audiobookshelf (default: `true`).
+- `llm_system_prompt`: A custom instruction set for the LLM to improve extraction accuracy.
 
 ---
 
@@ -82,18 +88,24 @@ uv run skimmer --revert abs_your_item_id
 
 - `--force`: Process all books, even those that already have an ASIN.
 - `--reprocess`: Process books even if they already have the `ai-skimmed` tag.
+- `--retranscribe`: Force a new transcription even if one exists in the database.
 - `--config <path>`: Use a custom configuration file.
 - `--item-id <ID>`: Process only a single specific library item.
+- `--throttle <sec>`: Seconds to wait between server requests (default: 1.0).
+- `--report [run_id]`: Show a summary of the latest run or a specific Run ID.
+- `--list-runs`: Show a history of all past execution runs.
+- `--item-info <ID>`: Show deep-dive details for a specific book (metadata, transcript, decision).
 
 ---
 
 ## 🛠️ How It Works
 
-1. **Scan**: The script fetches your library items, skipping any with ASINs or "exclude" tags.
-2. **Stream & Capture**: Uses `ffmpeg` to capture a short slice directly from the ABS stream.
-3. **Transcribe**: The slice is transcribed locally on your GPU using Parakeet-MLX.
-4. **Analyze**: The transcript is sent to a local LLM via `mlx-lm`.
-5. **Apply & Log**: If the LLM finds better metadata, it updates ABS, adds the `ai-skimmed` tag, and logs the change to `history.db`.
+1. **Discovery (Server-Safe)**: The script fetches library items using **pagination** (100 at a time) and a mandatory throttle delay to avoid overloading your server.
+2. **Persistent Queue**: Items are queued with a `run_id` for tracking and reporting.
+3. **Stream & Capture**: For each queued item (**one at a time**), `ffmpeg` captures exactly 120s of audio directly from the stream.
+4. **Transcribe**: The slice is transcribed locally using Parakeet-MLX and saved to the DB immediately.
+5. **Analyze**: Transcripts are processed by a local LLM in a separate phase, ensuring memory is freed between steps.
+6. **Apply & Report**: Metadata is updated in ABS, and a detailed report is generated for the run.
 
 ---
 
