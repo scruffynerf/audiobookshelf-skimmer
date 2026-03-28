@@ -1,0 +1,40 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# OS-specific
+.DS_Store
+Thumbs.db
+
+# Virtual Environments
+.venv/
+venv/
+env/
+ENV/
+.env
+
+# uv / packaging
+uv.lock
+dist/
+build/
+*.egg-info/
+
+# Project-specific
+config.json
+*.log
+tmp/
+snippet_*
+raw_*
+*.db
+*.db-shm
+*.db-wal
+
+# Audio files (if accidentally kept in root)
+*.m4b
+*.m4a
+*.mp3
+*.flac
+*.wav
+*.pdf
+*.epub

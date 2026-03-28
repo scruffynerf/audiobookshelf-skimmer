@@ -1,0 +1,6 @@
+parakeet-mlx>=0.5.1
+requests>=2.32.5
+numpy
+torch
+static-ffmpeg
+

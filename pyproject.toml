@@ -1,0 +1,24 @@
+[project]
+name = "audiobookshelf-skimmer"
+version = "0.1.0"
+description = "Automatically correct Audiobookshelf metadata using local LLM transcription."
+authors = [
+    { name = "scruffynerf", email = "scruffynerf@duck.com" }
+]
+license = { text = "GPL-3.0-only" }
+requires-python = ">=3.10"
+dependencies = [
+    "parakeet-mlx>=0.5.1",
+    "requests>=2.33.0",
+    "numpy>=2.4.3",
+    "torch>=2.11.0",
+    "static-ffmpeg>=3.0",
+    "mlx-lm>=0.31.1",
+]
+
+[project.scripts]
+skimmer = "audiobookshelf_skimmer.sync_metadata:main"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
