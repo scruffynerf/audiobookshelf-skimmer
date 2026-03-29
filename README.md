@@ -111,6 +111,7 @@ uv run skimmer --revert abs_your_item_id
 | `--limit <n>` | Stop after processing this many items total. |
 | `--force-tag <tag>` | Strictly process only items with this tag. Overrides ASIN skip, clears the ASIN in ABS, and forces a full re-transcription. Tag is removed on success. |
 | `--no-metadatahints` | Perform a "blind" extraction by omitting existing metadata from the LLM prompt. |
+| `--no-guardrail` | Disable hallucination detection, accepting all AI results regardless of transcription matches. |
 | `--throttle <sec>` | Seconds to wait between server requests (default: `1.0`). |
 | `--config <path>` | Use a custom configuration file. |
 | `--item-id <ID>` | Process only a single specific library item. |

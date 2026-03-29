@@ -155,6 +155,7 @@ def run_sync(args, config: Dict):
     throttle_sec = args.throttle
     force_tag = args.force_tag
     no_metadatahints = args.no_metadatahints
+    no_guardrail = args.no_guardrail
 
     last_request_time = 0
     total_processed = 0
@@ -328,7 +329,7 @@ def run_sync(args, config: Dict):
                             
                         logger.info(f"LLM suggested: {json.dumps(suggested)}")
                         
-                        if llm_client.is_hallucinated(suggested, transcript, current_metadata=metadata):
+                        if not no_guardrail and llm_client.is_hallucinated(suggested, transcript, current_metadata=metadata):
                             if attempt < ai_retries:
                                 continue
                             history_manager.save_result(item_id, suggested, status="hallucinated")
@@ -478,6 +479,7 @@ def main():
     parser.add_argument("--retry-failed", action="store_true", help="Re-queue items that previously failed (failed-ai, failed-transcription, hallucinated status)")
     parser.add_argument("--force-tag", help="Reprocess all items with this tag and remove it when done (forces re-transcription)")
     parser.add_argument("--no-metadatahints", action="store_true", help="Do not provide existing metadata to the LLM (test blind extraction)")
+    parser.add_argument("--no-guardrail", action="store_true", help="Disable hallucination detection (always accept AI results)")
     parser.add_argument("--report", nargs="?", const="", help="View summary of the latest run or a specific run ID")
     parser.add_argument("--list-runs", action="store_true", help="Display a table of past executions")
     parser.add_argument("--barebones-report", action="store_true", help="Skip detailed change list in final report")
