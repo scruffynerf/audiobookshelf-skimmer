@@ -12,5 +12,8 @@
   
   "processed_tag": "ai-skimmed",
   "exclude_tag": "no-skim",
+  "library_mismatch_tag": "library_mismatch",
+  "wrong_title_tag": "wrong_title",
+  "wrong_author_tag": "wrong_author",
   "log_level": "INFO"
 }

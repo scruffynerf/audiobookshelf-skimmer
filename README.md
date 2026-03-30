@@ -22,6 +22,7 @@ Audiobookshelf Skimmer is a precision tool designed to automatically correct Tit
   - **Force Tag**: Use `--force-tag` to strictly focus on a set of problematic books. It clears an existing (potentially wrong) ASIN and performs a full re-process.
     - I added this to work with <https://github.com/scruffynerf/audiobookshelf-duration-checker> to fix books that had really wrong durations and incorrect metadata including an ASIN.
   - **Blind Extraction**: Use `--no-metadatahints` to force the AI to rely exclusively on the transcript, ignoring existing metadata.
+- **📂 Folder Consistency**: Use `--foldercheck` to audit your library structure. It verifies that the last two components of an item's folder path match the Author and Title metadata, flagging mismatches with configurable tags. It uses a **strict alpha-only normalization** (removing all numbers, punctuation, and spaces) to handle folder numbering (e.g., `01 Title` will match `Title`).
 
 ---
 
@@ -61,6 +62,9 @@ Edit `config.json`:
 - `processed_tag`: Tag applied to books after successful processing (default: `ai-skimmed`).
 - `ai_retries`: Number of times the LLM will retry if hallucination is detected (default: `1`).
 - `dry_run`: If `true`, no changes will be written to Audiobookshelf (default: `true`).
+- `library_mismatch_tag`: Tag applied when both Author and Title mismatch the folder (default: `library_mismatch`).
+- `wrong_author_tag`: Tag applied when only the Author mismatches the folder (default: `wrong_author`).
+- `wrong_title_tag`: Tag applied when only the Title mismatches the folder (default: `wrong_title`).
 - `llm_system_prompt`: A custom instruction set for the LLM to improve extraction accuracy.
 
 ---
@@ -109,6 +113,7 @@ uv run skimmer --revert abs_your_item_id
 | `--retranscribe` | Force a new transcription even if one exists in the database. |
 | `--library <name>` | Only process items from this named library. |
 | `--limit <n>` | Stop after processing this many items total. |
+| `--foldercheck` | Audit the folder structure vs internal metadata. Flags mismatches with tags. |
 | `--force-tag <tag>` | Strictly process only items with this tag. Overrides ASIN skip, clears the ASIN in ABS, and forces a full re-transcription. Tag is removed on success. |
 | `--no-metadatahints` | Perform a "blind" extraction by omitting existing metadata from the LLM prompt. |
 | `--no-guardrail` | Disable hallucination detection, accepting all AI results regardless of transcription matches. |
@@ -119,7 +124,7 @@ uv run skimmer --revert abs_your_item_id
 | `--report [run_id]` | Show a summary of the latest run or a specific Run ID. |
 | `--barebones-report` | Skip the detailed list of changes in the final report, showing only numerical counts. |
 | `--list-runs` | Show a history of all past execution runs. |
-| `--item-info <ID>` | Show full details for a specific book (metadata, transcript, AI decision). |
+| `--item-info <ID>` | Show full details for a book (metadata, transcript, AI decision) AND its **live ABS folder path**. |
 
 ---
 
